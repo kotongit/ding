@@ -36,14 +36,33 @@ Enter. `Ctrl-C` cancels.
 
 ## Install
 
-Needs Python 3 and nothing else.
+Needs Python 3.7+ and nothing else.
+
+**macOS / Linux**
 
 ```sh
 git clone https://github.com/kotongit/ding.git
 ln -s "$PWD/ding/ding" ~/.local/bin/ding    # any folder on your PATH works
 ```
 
-Currently macOS only: sounds use `afplay` and notifications use `osascript`.
+**Windows**
+
+```bat
+git clone https://github.com/kotongit/ding.git
+```
+
+Add the `ding` folder to your PATH. `ding.cmd` lets you run `ding` from there; without it, use
+`python ding`. Use Windows Terminal (the old console may not draw the emoji).
+
+## Sounds & notifications
+
+| | Sound | Notification |
+|---|---|---|
+| macOS | system sounds (Glass, Hero) | Notification Center |
+| Linux | freedesktop sounds via `paplay` / `pw-play` / `canberra-gtk-play` | `notify-send` |
+| Windows | system sounds (Asterisk, Exclamation) | — |
+
+If no sound player or sound file is found, `ding` falls back to the terminal bell.
 
 ## Credits
 

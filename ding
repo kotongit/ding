@@ -10,6 +10,7 @@ Usage:
 
 Dings at 50%, 75%, 90%, 95% and 100% of the time.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -18,8 +19,16 @@ import time
 from datetime import datetime, timedelta
 
 MILESTONES = [50, 75, 90, 95, 100]
-DING = "/System/Library/Sounds/Glass.aiff"
-DONE = "/System/Library/Sounds/Hero.aiff"
+
+# per-platform sounds for a milestone ("ding") and the end ("done")
+if sys.platform == "darwin":
+    SOUNDS = {"ding": "/System/Library/Sounds/Glass.aiff",
+              "done": "/System/Library/Sounds/Hero.aiff"}
+elif sys.platform == "win32":
+    SOUNDS = {"ding": "SystemAsterisk", "done": "SystemExclamation"}
+else:
+    SOUNDS = {"ding": "/usr/share/sounds/freedesktop/stereo/complete.oga",
+              "done": "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"}
 
 
 def parse_duration(text):
@@ -72,15 +81,44 @@ def fmt(seconds):
     return f"{h}:{m:02}:{s:02}" if h else f"{m:02}:{s:02}"
 
 
-def ding(sound, times=1):
+def bell():
+    sys.stdout.write("\a")
+    sys.stdout.flush()
+
+
+def play(kind):
+    sound = SOUNDS[kind]
+    if sys.platform == "win32":
+        import winsound
+        winsound.PlaySound(sound, winsound.SND_ALIAS | winsound.SND_ASYNC)
+        return
+    if sys.platform == "darwin":
+        players = [["afplay"]]
+    else:
+        players = [["paplay"], ["pw-play"], ["canberra-gtk-play", "-f"]]
+    if os.path.exists(sound):
+        for cmd in players:
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd + [sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+    bell()  # no player or sound file: fall back to the terminal beep
+
+
+def ding(kind, times=1):
     for _ in range(times):
-        subprocess.Popen(["afplay", sound])
+        play(kind)
         if times > 1:
             time.sleep(0.6)
 
 
 def notify(msg):
-    subprocess.Popen(["osascript", "-e", f'display notification "{msg}" with title "Timer"'])
+    if sys.platform == "darwin":
+        cmd = ["osascript", "-e", f'display notification "{msg}" with title "ding"']
+    elif sys.platform != "win32" and shutil.which("notify-send"):
+        cmd = ["notify-send", "ding", msg]
+    else:
+        return  # Windows and bare Linux: the on-screen status line is enough
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 CAT = [
@@ -157,11 +195,11 @@ def run(target):
                 if p == 100:
                     status = "time's up!  (press enter)"
                     render(target, start, total, pct, pending, status)
-                    ding(DONE, 3)
+                    ding("done", 3)
                     notify("Time's up!")
                 else:
                     status = f"ding! {p}% reached"
-                    ding(DING)
+                    ding("ding")
                     notify(f"{p}% — {fmt(total - elapsed)} left")
             render(target, start, total, pct, pending, status)
             if pending:
@@ -175,6 +213,9 @@ def run(target):
 
 
 def main():
+    if sys.platform == "win32":
+        os.system("")  # turns on ANSI escape codes in the Windows console
+        sys.stdout.reconfigure(encoding="utf-8")
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
         print(__doc__.strip())
