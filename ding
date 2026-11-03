@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""ding — turn an alarm time into a countdown that dings along the way.
+
+Usage:
+  ding today at 23:59
+  ding 23:59
+  ding tomorrow at 7:30
+  ding at 9pm
+  ding 20m            (plain durations work too: 90s, 20m, 1h30m)
+
+Dings at 50%, 75%, 90%, 95% and 100% of the time.
+"""
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+MILESTONES = [50, 75, 90, 95, 100]
+DING = "/System/Library/Sounds/Glass.aiff"
+DONE = "/System/Library/Sounds/Hero.aiff"
+
+
+def parse_duration(text):
+    m = re.fullmatch(r"(?:(\d+)h)?\s*(?:(\d+)m(?:in)?)?\s*(?:(\d+)s)?", text)
+    if not m or not any(m.groups()):
+        return None
+    h, mi, s = (int(g or 0) for g in m.groups())
+    return timedelta(hours=h, minutes=mi, seconds=s)
+
+
+def parse_target(words, now):
+    text = " ".join(words).lower().strip()
+
+    dur = parse_duration(text.replace(" ", ""))
+    if dur:
+        return now + dur
+
+    day_offset = 0
+    explicit_day = False
+    if "tomorrow" in text:
+        day_offset, explicit_day = 1, True
+    elif "today" in text or "tonight" in text:
+        explicit_day = True
+    text = re.sub(r"\b(today|tonight|tomorrow|at|for)\b", " ", text).strip()
+
+    m = re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?(?::(\d{2}))?\s*(am|pm)?", text)
+    if not m:
+        raise ValueError(f"couldn't understand time: {' '.join(words)!r}")
+    hour, minute, second = int(m[1]), int(m[2] or 0), int(m[3] or 0)
+    if m[4] == "pm" and hour < 12:
+        hour += 12
+    elif m[4] == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError("time out of range")
+
+    target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    target += timedelta(days=day_offset)
+    if target <= now:
+        if explicit_day:
+            raise ValueError(f"{target:%H:%M} today has already passed")
+        target += timedelta(days=1)  # bare time in the past → next occurrence
+    return target
+
+
+def fmt(seconds):
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02}:{s:02}" if h else f"{m:02}:{s:02}"
+
+
+def ding(sound, times=1):
+    for _ in range(times):
+        subprocess.Popen(["afplay", sound])
+        if times > 1:
+            time.sleep(0.6)
+
+
+def notify(msg):
+    subprocess.Popen(["osascript", "-e", f'display notification "{msg}" with title "Timer"'])
+
+
+CAT = [
+    r"      \    /\ ",
+    r"       )  ( ')",
+    r"      (  /  ) ",
+    r"—sea   \(__)| ",
+]
+
+DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
+
+
+def render(target, start, total, pct, pending, status):
+    cols, rows = shutil.get_terminal_size()
+    remaining = total - (time.time() - start)
+    width = max(10, min(50, cols - 12))
+
+    # progress bar with milestone ticks
+    ticks = {round(p / 100 * width) - 1 for p in MILESTONES[:-1]}
+    filled = int(width * pct / 100)
+    bar = "".join(
+        "█" if i < filled else ("┃" if i in ticks else "░") for i in range(width))
+
+    marks = "   ".join(
+        (f"{BOLD}●{RESET} {p}%" if p not in pending else f"{DIM}○ {p}%{RESET}") for p in MILESTONES)
+    marks_len = sum(len(f"● {p}%") for p in MILESTONES) + 3 * (len(MILESTONES) - 1)
+
+    nxt = (f"next ding {datetime.fromtimestamp(start + total * pending[0] / 100):%H:%M:%S}"
+           if pending else "")
+    block = [
+        (f"⏰ {target:%a %H:%M:%S}", 1),           # emoji is 2 cells wide
+        ("", 0),
+        (f"{BOLD}{fmt(remaining)}{RESET}", -len(BOLD) - len(RESET)),
+        (f"{DIM}remaining of {fmt(total)}{RESET}", -len(DIM) - len(RESET)),
+        ("", 0),
+        (f"{bar}  {pct:5.1f}%", 0),
+        ("", 0),
+        (marks, marks_len - len(marks)),
+        ("", 0),
+        (f"{DIM}{status or nxt}{RESET}", -len(DIM) - len(RESET)),
+    ]
+
+    screen = [""] * rows
+    top = max(0, (rows - len(block)) // 2 - 1)
+    for i, (text, adj) in enumerate(block):
+        if top + i < rows:
+            pad = max(0, (cols - (len(text) + adj)) // 2)
+            screen[top + i] = " " * pad + text
+
+    # cat in the bottom-left corner, if there's room
+    cat_w = max(len(l) for l in CAT)
+    if rows >= len(block) + len(CAT) + 2 and cols >= cat_w + 2:
+        for j, line in enumerate(CAT):
+            r = rows - len(CAT) + j - 1
+            screen[r] = " " + line + screen[r][cat_w + 1:]
+
+    sys.stdout.write("\033[H" + "\n".join(l + "\033[K" for l in screen) + "\033[J")
+    sys.stdout.flush()
+
+
+def run(target):
+    start = time.time()
+    total = target.timestamp() - start
+    pending = list(MILESTONES)
+    status = ""
+
+    sys.stdout.write("\033[?1049h\033[?25l")  # alternate screen, hide cursor
+    try:
+        while pending:
+            elapsed = time.time() - start
+            pct = min(100.0, elapsed / total * 100)
+            while pending and pct >= pending[0]:
+                p = pending.pop(0)
+                if p == 100:
+                    status = "time's up!  (press enter)"
+                    render(target, start, total, pct, pending, status)
+                    ding(DONE, 3)
+                    notify("Time's up!")
+                else:
+                    status = f"ding! {p}% reached"
+                    ding(DING)
+                    notify(f"{p}% — {fmt(total - elapsed)} left")
+            render(target, start, total, pct, pending, status)
+            if pending:
+                time.sleep(0.25)
+        if sys.stdin.isatty():
+            input()
+    finally:
+        sys.stdout.write("\033[?25h\033[?1049l")
+        sys.stdout.flush()
+    print(f"✅ {fmt(total)} timer finished at {target:%H:%M:%S}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    try:
+        target = parse_target(args, datetime.now())
+    except ValueError as e:
+        sys.exit(f"ding: {e}")
+    try:
+        run(target)
+    except KeyboardInterrupt:
+        print("⏹  cancelled")
+
+
+if __name__ == "__main__":
+    main()
